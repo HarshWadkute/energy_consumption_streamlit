@@ -1,80 +1,74 @@
-# app.py
 import streamlit as st
 import joblib, json
-from pathlib import Path
-import pandas as pd
 import numpy as np
+import pandas as pd
+from pathlib import Path
 
 st.set_page_config(page_title="Energy Consumption Predictor", layout="centered")
-st.title("⚡ Energy Consumption Predictor (Stacking Regressor)")
+st.title("⚡ Energy Consumption Predictor (LabelEncoder version)")
 
-MODEL_PATH = Path("model/energy_pipeline_stacking.pkl")
-CATS_PATH = Path("model/categories.json")
+MODEL_DIR = Path("model")
+MODEL = MODEL_DIR / "stacking_regressor_only.pkl"
+SCALER = MODEL_DIR / "standard_scaler.pkl"
+LE_B = MODEL_DIR / "le_building.pkl"
+LE_D = MODEL_DIR / "le_day.pkl"
+META = MODEL_DIR / "model_meta.json"
 
 @st.cache_resource
 def load_artifacts():
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
-    if not CATS_PATH.exists():
-        raise FileNotFoundError(f"Categories file not found: {CATS_PATH}")
-    model = joblib.load(MODEL_PATH.open("rb"))
-    with open(CATS_PATH, "r") as f:
-        categories = json.load(f)
-    return model, categories
+    model = joblib.load(MODEL.open("rb"))
+    scaler = joblib.load(SCALER.open("rb"))
+    le_building = joblib.load(LE_B.open("rb"))
+    le_day = joblib.load(LE_D.open("rb"))
+    with open(META) as f:
+        meta = json.load(f)
+    return model, scaler, le_building, le_day, meta
 
-try:
-    model, categories = load_artifacts()
-except Exception as e:
-    st.error(f"Failed to load model or categories: {e}")
-    st.stop()
+model, scaler, le_building, le_day, meta = load_artifacts()
 
-st.write("Enter building & environment features below. Feature names and types match the training notebook.")
+numeric_cols = meta["numeric_cols"]
+categorical_cols = meta["categorical_cols"]
+categories = meta["categories"]
 
-# ---------- INPUTS: MUST match exact column *names* used in training ----------
-# Numeric features
+# UI
 col1, col2 = st.columns(2)
 with col1:
-    sqft = st.number_input("Square Footage", min_value=0.0, value=1200.0, step=1.0)
-    occupants = st.number_input("Number of Occupants", min_value=0, value=3, step=1)
-    appliances = st.number_input("Appliances Used (count)", min_value=0, value=5, step=1)
+    sf = st.number_input("Square Footage", value=1000.0)
+    occ = st.number_input("Number of Occupants", value=2)
+    apps = st.number_input("Appliances Used", value=4)
 with col2:
-    avg_temp = st.number_input("Average Temperature (°C)", min_value=-50.0, value=24.0, step=0.1)
+    temp = st.number_input("Average Temperature", value=24.0)
 
-# Categorical features (populate from categories.json)
-building_types = categories.get("Building Type", [])
-day_of_week = categories.get("Day of Week", [])
+building = st.selectbox("Building Type", categories["Building Type"])
+day = st.selectbox("Day of Week", categories["Day of Week"])
 
-# If categories are empty arrays, show a text input fallback
-if building_types:
-    building = st.selectbox("Building Type", building_types)
-else:
-    building = st.text_input("Building Type (free text)")
-
-if day_of_week:
-    day = st.selectbox("Day of Week", day_of_week)
-else:
-    day = st.text_input("Day of Week (free text)")
-
-# Build DataFrame in same column order/names as training
-input_df = pd.DataFrame([{
-    "Square Footage": float(sqft),
-    "Number of Occupants": int(occupants),
-    "Appliances Used": int(appliances),
-    "Average Temperature": float(avg_temp),
-    "Building Type": str(building),
-    "Day of Week": str(day)
+# Build DF
+df_in = pd.DataFrame([{
+    "Square Footage": sf,
+    "Number of Occupants": occ,
+    "Appliances Used": apps,
+    "Average Temperature": temp,
+    "Building Type": building,
+    "Day of Week": day
 }])
 
-st.subheader("Input preview")
-st.dataframe(input_df)
+st.write("Input:", df_in)
 
-if st.button("Predict energy consumption"):
+if st.button("Predict"):
     try:
-        # pipeline includes preprocessing, so pass DataFrame
-        pred = model.predict(input_df)
-        val = float(pred[0])
-        st.success(f"Predicted energy consumption: **{val:.3f}** (same units used in training)")
-        # If model supports predict_proba or other diagnostics, show them here.
+        # Numeric
+        X_num = scaler.transform(df_in[numeric_cols])
+
+        # Categorical using LabelEncoder
+        b_enc = le_building.transform(df_in["Building Type"])
+        d_enc = le_day.transform(df_in["Day of Week"])
+
+        X_cat = np.column_stack([b_enc, d_enc])
+
+        # Final feature vector (must match training)
+        X_final = np.hstack([X_num, X_cat])
+
+        pred = model.predict(X_final)
+        st.success(f"Predicted Energy Consumption: **{float(pred[0]):.3f}**")
     except Exception as e:
-        st.error(f"Prediction failed: {e}")
-        st.write("If you saved only the raw model (without preprocessing), you must apply the same preprocessing steps before calling predict.")
+        st.error(str(e))
